@@ -1,0 +1,287 @@
+// CareQ - Smart Hospital Patient Queue Management System
+// Prisma Schema - SQLite / Local Development & Testing
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String      @id @default(cuid())
+  fullName     String
+  email        String      @unique
+  phone        String?
+  passwordHash String
+  role         String      @default("PATIENT") // PATIENT, DOCTOR, RECEPTIONIST, ADMIN
+  status       String      @default("ACTIVE")  // ACTIVE, INACTIVE, SUSPENDED
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  patient             Patient?
+  doctor              Doctor?
+  notifications       Notification[]
+  auditLogs           AuditLog[]
+  reportedDelays      DelayEvent[]         @relation("ReportedDelays")
+  authorizedTransfers QueueTransferEvent[] @relation("AuthorizedTransfers")
+  reportedEmergencies EmergencyQueueEvent[] @relation("ReportedEmergencies")
+
+  @@index([email])
+  @@index([role])
+}
+
+model Patient {
+  id               String        @id @default(cuid())
+  userId           String        @unique
+  user             User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  dob              DateTime?
+  gender           String?
+  bloodGroup       String?
+  emergencyContact String?
+  address          String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  appointments  Appointment[]
+  queueEntries  QueueEntry[]
+  consultations Consultation[]
+}
+
+model Department {
+  id                  String   @id @default(cuid())
+  name                String   @unique
+  code                String   @unique // e.g. CARD, ORTH, ENT, GEN
+  description         String?
+  avgConsultationMins Int      @default(15)
+  active              Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  doctors       Doctor[]
+  appointments  Appointment[]
+  queues        Queue[]
+  queueEntries  QueueEntry[]
+  delayEvents   DelayEvent[]
+}
+
+model Doctor {
+  id              String       @id @default(cuid())
+  userId          String       @unique
+  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  departmentId    String
+  department      Department   @relation(fields: [departmentId], references: [id])
+  specialization  String
+  roomNumber      String
+  consultationFee Float        @default(500.0)
+  status          String       @default("AVAILABLE") // AVAILABLE, IN_CONSULTATION, ON_BREAK, DELAYED, OFF_DUTY
+  currentDelayMins Int         @default(0)
+  delayReason     String?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  availabilities DoctorAvailability[]
+  appointments   Appointment[]
+  queues         Queue[]
+  queueEntries   QueueEntry[]
+  consultations  Consultation[]
+  delayEvents    DelayEvent[]
+
+  @@index([departmentId])
+  @@index([status])
+}
+
+model DoctorAvailability {
+  id               String   @id @default(cuid())
+  doctorId         String
+  doctor           Doctor   @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  dayOfWeek        Int      // 0 = Sunday, 1 = Monday, ...
+  startTime        String   // "09:00"
+  endTime          String   // "17:00"
+  slotDurationMins Int      @default(15)
+  active           Boolean  @default(true)
+
+  @@index([doctorId, dayOfWeek])
+}
+
+model Appointment {
+  id              String            @id @default(cuid())
+  appointmentDate DateTime          // Date of appointment
+  appointmentTime String            // "10:30"
+  tokenNumber     String            // Unique token formatted as CARD-015
+  patientId       String
+  patient         Patient           @relation(fields: [patientId], references: [id])
+  doctorId        String
+  doctor          Doctor            @relation(fields: [doctorId], references: [id])
+  departmentId    String
+  department      Department        @relation(fields: [departmentId], references: [id])
+  status          String            @default("BOOKED") // BOOKED, CONFIRMED, CANCELLED, COMPLETED
+  isWalkIn        Boolean           @default(false)
+  symptoms        String?
+  notes           String?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  queueEntry QueueEntry?
+
+  @@unique([departmentId, tokenNumber, appointmentDate])
+  @@index([appointmentDate, doctorId])
+  @@index([patientId])
+}
+
+model Queue {
+  id           String      @id @default(cuid())
+  departmentId String
+  department   Department  @relation(fields: [departmentId], references: [id])
+  doctorId     String?
+  doctor       Doctor?     @relation(fields: [doctorId], references: [id])
+  date         DateTime    @default(now())
+  status       String      @default("ACTIVE") // ACTIVE, PAUSED, CLOSED
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  entries              QueueEntry[]
+  emergencyEvents      EmergencyQueueEvent[]
+  sourceTransfers      QueueTransferEvent[]  @relation("SourceQueue")
+  targetTransfers      QueueTransferEvent[]  @relation("TargetQueue")
+
+  @@index([departmentId, date])
+}
+
+model QueueEntry {
+  id                    String           @id @default(cuid())
+  queueId               String
+  queue                 Queue            @relation(fields: [queueId], references: [id], onDelete: Cascade)
+  appointmentId         String?          @unique
+  appointment           Appointment?     @relation(fields: [appointmentId], references: [id])
+  patientId             String
+  patient               Patient          @relation(fields: [patientId], references: [id])
+  doctorId              String
+  doctor                Doctor           @relation(fields: [doctorId], references: [id])
+  departmentId          String
+  department            Department       @relation(fields: [departmentId], references: [id])
+  tokenNumber           String
+  sequenceNumber        Int              // Ordering inside the queue
+  status                String           @default("WAITING") // WAITING, CALLED, IN_CONSULTATION, COMPLETED, NO_SHOW, CANCELLED
+  priority              Int              @default(0) // Higher value = higher priority (e.g. emergencies)
+  isEmergency           Boolean          @default(false)
+  estimatedWaitMins     Int              @default(0)
+  actualWaitMins        Int?
+  calledAt              DateTime?
+  consultationStartedAt DateTime?
+  consultationEndedAt   DateTime?
+  notes                 String?
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  consultation   Consultation?
+  transferEvents QueueTransferEvent[]
+
+  @@index([queueId, status, sequenceNumber])
+  @@index([patientId])
+  @@index([doctorId])
+}
+
+model Consultation {
+  id               String     @id @default(cuid())
+  queueEntryId     String     @unique
+  queueEntry       QueueEntry @relation(fields: [queueEntryId], references: [id])
+  doctorId         String
+  doctor           Doctor     @relation(fields: [doctorId], references: [id])
+  patientId        String
+  patient          Patient    @relation(fields: [patientId], references: [id])
+  diagnosis        String?
+  prescription     String?
+  operationalNotes String?
+  startedAt        DateTime   @default(now())
+  endedAt          DateTime?
+  durationMins     Int?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  @@index([doctorId])
+  @@index([patientId])
+}
+
+model EmergencyQueueEvent {
+  id                    String    @id @default(cuid())
+  queueId               String
+  queue                 Queue     @relation(fields: [queueId], references: [id])
+  emergencyToken        String
+  reason                String
+  reportedByStaffId     String
+  reportedByStaff       User      @relation("ReportedEmergencies", fields: [reportedByStaffId], references: [id])
+  proposedDelayMins     Int       @default(15)
+  affectedPatientsCount Int       @default(0)
+  confirmed             Boolean   @default(false)
+  appliedAt             DateTime?
+  createdAt             DateTime  @default(now())
+
+  @@index([queueId])
+}
+
+model DelayEvent {
+  id                 String     @id @default(cuid())
+  doctorId           String
+  doctor             Doctor     @relation(fields: [doctorId], references: [id])
+  departmentId       String
+  department         Department @relation(fields: [departmentId], references: [id])
+  delayMinutes       Int
+  reason             String     // Extended consultation, Doctor unavailable, Emergency case, Department overload, Other
+  expectedReturnTime DateTime?
+  reportedByUserId   String
+  reportedByUser     User       @relation("ReportedDelays", fields: [reportedByUserId], references: [id])
+  resolvedAt         DateTime?
+  createdAt          DateTime   @default(now())
+
+  @@index([doctorId])
+  @@index([departmentId])
+}
+
+model QueueTransferEvent {
+  id                 String     @id @default(cuid())
+  sourceQueueId      String
+  sourceQueue        Queue      @relation("SourceQueue", fields: [sourceQueueId], references: [id])
+  targetQueueId      String
+  targetQueue        Queue      @relation("TargetQueue", fields: [targetQueueId], references: [id])
+  queueEntryId       String
+  queueEntry         QueueEntry @relation(fields: [queueEntryId], references: [id])
+  reason             String
+  authorizedByUserId String
+  authorizedByUser   User       @relation("AuthorizedTransfers", fields: [authorizedByUserId], references: [id])
+  createdAt          DateTime   @default(now())
+
+  @@index([sourceQueueId])
+  @@index([targetQueueId])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  message   String
+  type      String   @default("GENERAL") // QUEUE_UPDATE, DELAY, EMERGENCY, TURN_APPROACHING, APPOINTMENT, GENERAL
+  isRead    Boolean  @default(false)
+  metadata  String?  // JSON metadata
+  createdAt DateTime @default(now())
+
+  @@index([userId, isRead])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action     String   // CALL_PATIENT, REPORT_DELAY, EMERGENCY_OVERRIDE, REASSIGN_DOCTOR, etc.
+  entityType String   // QueueEntry, Doctor, EmergencyQueueEvent, etc.
+  entityId   String?
+  details    String?  // JSON formatted details
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  @@index([action])
+  @@index([entityType, entityId])
+}
